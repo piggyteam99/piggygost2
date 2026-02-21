@@ -1,9 +1,7 @@
 #!/bin/bash
 
 # ==========================================
-# Gost Aggregation Tunnel FINAL VERSION
-# 100% Compatible with gost v2.11.5
-# No range bug, No crash, Real LoadBalance
+# Gost Bandwidth Aggregation (Relay+MWS)
 # ==========================================
 
 RED='\033[0;31m'
@@ -13,68 +11,58 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}Please run as root${NC}"
-    exit
+  echo -e "${RED}لطفا با دسترسی Root اجرا کنید.${NC}"
+  exit
 fi
 
-# ==========================================
-# Install Gost
-# ==========================================
-
-install_gost() {
-
+install_prerequisites() {
     clear
-    echo -e "${CYAN}Installing Gost...${NC}"
+    echo -e "${CYAN}در حال نصب پیش‌نیازها...${NC}"
+    apt-get update
+    apt-get install -y wget curl tar ufw
 
-    apt-get update -y
-    apt-get install -y wget ufw
-
-    systemctl stop gost 2>/dev/null
-    rm -f /usr/local/bin/gost
-
-    wget https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz -O gost.gz
-
-    gzip -d gost.gz
-
-    mv gost /usr/local/bin/gost
-
-    chmod +x /usr/local/bin/gost
-
-    echo -e "${GREEN}Gost installed successfully ✔${NC}"
+    if [ ! -f "/usr/local/bin/gost" ]; then
+        wget https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz -O gost.gz
+        gzip -d gost.gz
+        mv gost /usr/local/bin/gost
+        chmod +x /usr/local/bin/gost
+    fi
+    echo -e "${GREEN}نصب با موفقیت انجام شد.${NC}"
     sleep 2
 }
 
-# ==========================================
-# Setup Iran Tunnel
-# ==========================================
-
 setup_iran_tunnel() {
-
     clear
-    echo -e "${CYAN}Configuring Iran Tunnel${NC}"
-
-    read -p "Enter Iran listen port: " LOCAL_PORT
-    read -p "Enter Kharej IP: " FOREIGN_IP
-    read -p "Enter start port: " START_PORT
-    read -p "Enter end port: " END_PORT
-
-    FORWARD_ARGS=""
-
-    for ((PORT=$START_PORT; PORT<=$END_PORT; PORT++))
-    do
-        FORWARD_ARGS="$FORWARD_ARGS -F relay+mws://$FOREIGN_IP:$PORT"
+    read -p "پورت داخلی (ایران): " LOCAL_PORT
+    read -p "آی‌پی سرور خارج: " FOREIGN_IP
+    read -p "پورت خارجی (پورت کانفیگ V2ray در خارج): " TARGET_PORT
+    read -p "شروع رنج پورت: " RANGE_START
+    read -p "پایان رنج پورت: " RANGE_END
+    
+    # ساخت رشته لودبالانس (اصلاح شده)
+    # فرمت صحیح در Gost: scheme://host1:port1,host2:port2?strategy=round
+    HOSTS=""
+    for (( p=$RANGE_START; p<=$RANGE_END; p++ )); do
+        if [ -z "$HOSTS" ]; then
+            HOSTS="${FOREIGN_IP}:${p}"
+        else
+            HOSTS="${HOSTS},${FOREIGN_IP}:${p}"
+        fi
     done
+    
+    # اضافه کردن max_fails و fail_timeout برای پایداری شبکه در صورت قطعی یک پورت
+    F_STR="relay+mws://${HOSTS}?strategy=round&max_fails=1&fail_timeout=10s"
 
     SERVICE_NAME="gost-ir-${LOCAL_PORT}.service"
-
     cat <<EOF > /etc/systemd/system/${SERVICE_NAME}
 [Unit]
-Description=Gost Iran Aggregation Tunnel
+Description=Gost Iran Tunnel
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/gost -L tcp://0.0.0.0:${LOCAL_PORT} ${FORWARD_ARGS}
+# دریافت ترافیک از کاربر و ارسال به صورت پخش‌شده (Round-Robin) به رنج پورت‌ها در خارج برای رسیدن به پورت هدف
+ExecStart=/usr/local/bin/gost -L tcp://0.0.0.0:${LOCAL_PORT}/127.0.0.1:${TARGET_PORT} -F "${F_STR}"
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -84,54 +72,43 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable ${SERVICE_NAME}
-    systemctl restart ${SERVICE_NAME}
+    systemctl enable $SERVICE_NAME
+    systemctl start $SERVICE_NAME
+    ufw allow $LOCAL_PORT/tcp >/dev/null 2>&1
 
-    ufw allow ${LOCAL_PORT}/tcp >/dev/null 2>&1
-
+    # بررسی وضعیت اجرا
     sleep 1
-
-    if systemctl is-active --quiet ${SERVICE_NAME}; then
-        echo -e "${GREEN}Iran tunnel started successfully ✔${NC}"
+    if systemctl is-active --quiet $SERVICE_NAME; then
+        echo -e "${GREEN}تانل ایران با موفقیت فعال شد!${NC}"
+        echo -e "${YELLOW}فرمان اجرا شده در پس‌زمینه:${NC}"
+        echo -e "/usr/local/bin/gost -L tcp://0.0.0.0:${LOCAL_PORT}/127.0.0.1:${TARGET_PORT} -F \"${F_STR}\""
     else
-        echo -e "${RED}Iran tunnel FAILED ❌${NC}"
-        journalctl -u ${SERVICE_NAME} -n 10 --no-pager
+        echo -e "${RED}خطا در استارت سرویس! لطفا مقادیر را چک کنید.${NC}"
     fi
-
-    sleep 3
+    sleep 5
 }
-
-# ==========================================
-# Setup Kharej Tunnel
-# ==========================================
 
 setup_kharej_tunnel() {
-
     clear
-    echo -e "${CYAN}Configuring Kharej Tunnel${NC}"
+    read -p "شروع رنج پورت: " RANGE_START
+    read -p "پایان رنج پورت: " RANGE_END
 
-    read -p "Enter start port: " START_PORT
-    read -p "Enter end port: " END_PORT
-    read -p "Enter target port (Xray/V2ray): " TARGET_PORT
-
-    CMD="/usr/local/bin/gost"
-
-    for ((PORT=$START_PORT; PORT<=$END_PORT; PORT++))
-    do
-        CMD="$CMD -L relay+mws://0.0.0.0:$PORT/127.0.0.1:$TARGET_PORT"
-        ufw allow $PORT/tcp >/dev/null 2>&1
+    L_STR=""
+    for (( p=$RANGE_START; p<=$RANGE_END; p++ )); do
+        L_STR="${L_STR} -L relay+mws://0.0.0.0:${p}"
+        ufw allow $p/tcp >/dev/null 2>&1
     done
 
-    SERVICE_NAME="gost-kharej.service"
-
+    SERVICE_NAME="gost-kh-range.service"
     cat <<EOF > /etc/systemd/system/${SERVICE_NAME}
 [Unit]
-Description=Gost Kharej Aggregation Tunnel
+Description=Gost Kharej Tunnel Range
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=${CMD}
+# لیسن کردن روی تمام رنج پورت‌ها برای دریافت ترافیک و هدایت اتوماتیک به پورت هدف
+ExecStart=/usr/local/bin/gost ${L_STR}
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -141,124 +118,78 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable ${SERVICE_NAME}
-    systemctl restart ${SERVICE_NAME}
+    systemctl enable $SERVICE_NAME
+    systemctl start $SERVICE_NAME
 
     sleep 1
-
-    if systemctl is-active --quiet ${SERVICE_NAME}; then
-        echo -e "${GREEN}Kharej tunnel started successfully ✔${NC}"
+    if systemctl is-active --quiet $SERVICE_NAME; then
+        echo -e "${GREEN}تانل خارج فعال شد و در حال گوش دادن به پورت‌هاست!${NC}"
     else
-        echo -e "${RED}Kharej tunnel FAILED ❌${NC}"
-        journalctl -u ${SERVICE_NAME} -n 10 --no-pager
+        echo -e "${RED}خطا در استارت سرویس! ممکن است تعداد پورت‌ها بیش از حد زیاد باشد.${NC}"
     fi
-
-    sleep 3
+    sleep 4
 }
 
-# ==========================================
-# Manage Tunnels
-# ==========================================
-
 manage_tunnels() {
-
     clear
-
-    SERVICES=$(ls /etc/systemd/system/gost-*.service 2>/dev/null)
-
-    if [ -z "$SERVICES" ]; then
-        echo "No tunnels found"
+    files=(/etc/systemd/system/gost-*.service)
+    if [ ! -e "${files[0]}" ]; then
+        echo -e "${RED}هیچ تانلی یافت نشد!${NC}"
         sleep 2
         return
     fi
-
-    i=1
-    for SERVICE in $SERVICES
-    do
-        NAME=$(basename $SERVICE)
-        STATUS=$(systemctl is-active $NAME)
-        echo "$i) $NAME - $STATUS"
-        ((i++))
+    count=1
+    for f in "${files[@]}"; do
+        filename=$(basename -- "$f")
+        status=$(systemctl is-active "$filename")
+        color=$([[ "$status" == "active" ]] && echo "$GREEN" || echo "$RED")
+        echo -e "${count}) ${filename} - [${color}${status}${NC}]"
+        ((count++))
     done
-
-    read -p "Enter number to delete (0 cancel): " NUM
-
-    if [ "$NUM" -gt 0 ]; then
-        TARGET=$(ls /etc/systemd/system/gost-*.service | sed -n "${NUM}p")
-        NAME=$(basename $TARGET)
-
-        systemctl stop $NAME
-        systemctl disable $NAME
-        rm -f $TARGET
-        systemctl daemon-reload
-
-        echo "Deleted ✔"
+    echo "1) حذف یک تانل | 0) بازگشت"
+    read -p "انتخاب: " choice
+    if [ "$choice" == "1" ]; then
+        read -p "شماره: " del_num
+        idx=$((del_num-1))
+        target=$(basename -- "${files[$idx]}")
+        systemctl stop "$target"; systemctl disable "$target"; rm "${files[$idx]}"; systemctl daemon-reload
+        echo -e "${GREEN}حذف شد.${NC}"; sleep 2
     fi
-
-    sleep 2
 }
-
-# ==========================================
-# Uninstall All
-# ==========================================
 
 uninstall_all() {
-
-    read -p "Remove everything? (y/n): " CONFIRM
-
-    if [[ "$CONFIRM" == "y" ]]; then
-
-        systemctl stop gost-*.service 2>/dev/null
-
-        rm -f /etc/systemd/system/gost-*.service
-        rm -f /usr/local/bin/gost
-
-        systemctl daemon-reload
-
-        echo "Uninstalled successfully"
-        exit
+    read -p "آیا مطمئن هستید؟ (y/n): " confirm
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        for f in /etc/systemd/system/gost-*.service; do
+            if [ -e "$f" ]; then
+                name=$(basename -- "$f")
+                systemctl stop "$name"; systemctl disable "$name"; rm "$f"
+            fi
+        done
+        systemctl daemon-reload; rm -f /usr/local/bin/gost
+        echo -e "${GREEN}پاکسازی کامل انجام شد.${NC}"; exit
     fi
 }
 
-# ==========================================
-# Menu
-# ==========================================
-
 menu() {
-
-while true
-do
-
-clear
-
-echo -e "${YELLOW}"
-echo "================================"
-echo " Gost Aggregation Tunnel FINAL"
-echo "================================"
-echo -e "${NC}"
-
-echo "1) Install Gost"
-echo "2) Setup Iran Tunnel"
-echo "3) Setup Kharej Tunnel"
-echo "4) Manage Tunnels"
-echo "5) Uninstall All"
-echo "0) Exit"
-
-read -p "Enter choice: " CHOICE
-
-case $CHOICE in
-
-1) install_gost ;;
-2) setup_iran_tunnel ;;
-3) setup_kharej_tunnel ;;
-4) manage_tunnels ;;
-5) uninstall_all ;;
-0) exit ;;
-
-esac
-
-done
-
+    while true; do
+        clear
+        echo -e "${YELLOW}=== Gost Aggregation Tunnel ===${NC}"
+        echo "1) نصب پیش‌نیازها"
+        echo "2) ساخت تانل سرور ایران"
+        echo "3) ساخت تانل سرور خارج"
+        echo "4) مدیریت تانل‌ها"
+        echo "5) حذف کامل همه چیز"
+        echo "0) خروج"
+        read -p "انتخاب: " choice
+        case $choice in
+            1) install_prerequisites ;;
+            2) setup_iran_tunnel ;;
+            3) setup_kharej_tunnel ;;
+            4) manage_tunnels ;;
+            5) uninstall_all ;;
+            0) exit 0 ;;
+        esac
+    done
 }
-
 menu
