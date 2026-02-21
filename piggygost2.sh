@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==========================================
-# Gost Bandwidth Aggregation (Relay+MWS)
+# Gost Bandwidth Aggregation (Relay+MWS) - Fixed
 # ==========================================
 
 RED='\033[0;31m'
@@ -17,11 +17,12 @@ fi
 
 install_prerequisites() {
     clear
-    echo -e "${CYAN}در حال نصب پیش‌نیازها...${NC}"
-    apt-get update
+    echo -e "${CYAN}در حال نصب و بروزرسانی پیش‌نیازها...${NC}"
+    apt-get update -y
     apt-get install -y wget curl tar ufw
 
     if [ ! -f "/usr/local/bin/gost" ]; then
+        echo -e "${YELLOW}در حال دانلود Gost...${NC}"
         wget https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz -O gost.gz
         gzip -d gost.gz
         mv gost /usr/local/bin/gost
@@ -33,15 +34,16 @@ install_prerequisites() {
 
 setup_iran_tunnel() {
     clear
+    echo -e "${YELLOW}--- تنظیمات سرور ایران ---${NC}"
     read -p "پورت داخلی (ایران): " LOCAL_PORT
     read -p "آی‌پی سرور خارج: " FOREIGN_IP
     read -p "پورت کانفیگ V2ray در سرور خارج: " TARGET_PORT
-    read -p "شروع رنج پورت: " RANGE_START
-    read -p "پایان رنج پورت: " RANGE_END
+    read -p "شروع رنج پورت لودبالانس: " RANGE_START
+    read -p "پایان رنج پورت لودبالانس: " RANGE_END
     
-    echo -e "${CYAN}در حال ساخت کانفیگ تجمیع پورت‌ها...${NC}"
+    echo -e "${CYAN}در حال پیکربندی...${NC}"
     
-    # ساخت رشته لودبالانس با فرمت صحیح برای Gost (جدا شده با کاما)
+    # ساخت لیست نودها با کاما
     HOSTS=""
     for (( p=$RANGE_START; p<=$RANGE_END; p++ )); do
         if [ -z "$HOSTS" ]; then
@@ -51,20 +53,22 @@ setup_iran_tunnel() {
         fi
     done
     
-    # پارامترهای لودبالانس و پایداری شبکه
-    F_STR="relay+mws://${HOSTS}?strategy=round&max_fails=1&fail_timeout=10s"
+    # اصلاح مهم: حذف max_fails برای جلوگیری از ارور none node available
+    # اضافه کردن keepalive برای پایداری بیشتر
+    F_STR="relay+mws://${HOSTS}?strategy=round&keepalive=true"
 
     SERVICE_NAME="gost-ir-${LOCAL_PORT}.service"
     cat <<EOF > /etc/systemd/system/${SERVICE_NAME}
 [Unit]
-Description=Gost Iran Tunnel
+Description=Gost Iran Tunnel (LoadBalanced)
 After=network.target
 
 [Service]
 Type=simple
+# دستور اجرا: دریافت از پورت لوکال و پخش بین پورت‌های خارج
 ExecStart=/usr/local/bin/gost -L tcp://0.0.0.0:${LOCAL_PORT}/127.0.0.1:${TARGET_PORT} -F "${F_STR}"
 Restart=always
-RestartSec=3
+RestartSec=2
 LimitNOFILE=1048576
 
 [Install]
@@ -76,28 +80,30 @@ EOF
     systemctl start $SERVICE_NAME
     ufw allow $LOCAL_PORT/tcp >/dev/null 2>&1
 
-    # بررسی وضعیت اجرا
     sleep 2
     if systemctl is-active --quiet $SERVICE_NAME; then
-        echo -e "${GREEN}✅ تانل ایران با موفقیت ایجاد و فعال شد!${NC}"
-        echo -e "${YELLOW}وضعیت سرویس در لینوکس:${NC}"
+        echo -e "${GREEN}✅ تانل ایران با موفقیت فیکس و فعال شد!${NC}"
+        echo -e "${YELLOW}وضعیت:${NC}"
         systemctl status $SERVICE_NAME --no-pager | grep "Active:"
     else
-        echo -e "${RED}❌ خطا در استارت سرویس! لطفا مقادیر را چک کنید.${NC}"
+        echo -e "${RED}❌ خطا در استارت سرویس!${NC}"
+        journalctl -u $SERVICE_NAME --no-pager -n 5
     fi
     echo ""
-    read -p "برای بازگشت به منو اینتر بزنید..."
+    read -p "اینتر بزنید تا به منو برگردید..."
 }
 
 setup_kharej_tunnel() {
     clear
+    echo -e "${YELLOW}--- تنظیمات سرور خارج ---${NC}"
     read -p "شروع رنج پورت: " RANGE_START
     read -p "پایان رنج پورت: " RANGE_END
     
-    echo -e "${CYAN}در حال آماده‌سازی پورت‌ها...${NC}"
+    echo -e "${CYAN}در حال باز کردن پورت‌ها...${NC}"
 
     L_STR=""
     for (( p=$RANGE_START; p<=$RANGE_END; p++ )); do
+        # لیسن کردن روی تمام پورت‌ها با پروتکل relay+mws
         L_STR="${L_STR} -L relay+mws://0.0.0.0:${p}"
         ufw allow $p/tcp >/dev/null 2>&1
     done
@@ -105,14 +111,14 @@ setup_kharej_tunnel() {
     SERVICE_NAME="gost-kh-range.service"
     cat <<EOF > /etc/systemd/system/${SERVICE_NAME}
 [Unit]
-Description=Gost Kharej Tunnel Range
+Description=Gost Kharej Multi-Port Listener
 After=network.target
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/gost ${L_STR}
 Restart=always
-RestartSec=3
+RestartSec=2
 LimitNOFILE=1048576
 
 [Install]
@@ -125,14 +131,13 @@ EOF
 
     sleep 2
     if systemctl is-active --quiet $SERVICE_NAME; then
-        echo -e "${GREEN}✅ تانل خارج فعال شد و در حال گوش دادن به پورت‌هاست!${NC}"
-        echo -e "${YELLOW}وضعیت سرویس در لینوکس:${NC}"
+        echo -e "${GREEN}✅ سرور خارج آماده دریافت ترافیک است!${NC}"
         systemctl status $SERVICE_NAME --no-pager | grep "Active:"
     else
-        echo -e "${RED}❌ خطا در استارت سرویس! ممکن است تعداد پورت‌ها بیش از حد زیاد باشد.${NC}"
+        echo -e "${RED}❌ خطا در سرور خارج!${NC}"
     fi
     echo ""
-    read -p "برای بازگشت به منو اینتر بزنید..."
+    read -p "اینتر بزنید تا به منو برگردید..."
 }
 
 manage_tunnels() {
@@ -143,46 +148,51 @@ manage_tunnels() {
         sleep 2
         return
     fi
+    
+    echo -e "${CYAN}لیست تانل‌های فعال:${NC}"
     count=1
     for f in "${files[@]}"; do
         filename=$(basename -- "$f")
         status=$(systemctl is-active "$filename")
         if [[ "$status" == "active" ]]; then
             color=$GREEN
-            status_text="در حال اجرا"
         else
             color=$RED
-            status_text="متوقف شده/خطا"
         fi
-        echo -e "${count}) ${filename} - [${color}${status_text}${NC}]"
+        echo -e "${count}) ${filename} -> [${color}${status}${NC}]"
         ((count++))
     done
+    
     echo "---------------------------------"
-    echo "1) حذف یک تانل | 0) بازگشت"
+    echo "1) حذف سرویس | 0) بازگشت"
     read -p "انتخاب: " choice
     if [ "$choice" == "1" ]; then
-        read -p "شماره تانل برای حذف: " del_num
+        read -p "شماره سرویس برای حذف: " del_num
         idx=$((del_num-1))
         target=$(basename -- "${files[$idx]}")
-        systemctl stop "$target"; systemctl disable "$target" >/dev/null 2>&1; rm "${files[$idx]}"; systemctl daemon-reload
-        echo -e "${GREEN}تانل با موفقیت حذف شد.${NC}"; sleep 2
+        systemctl stop "$target"
+        systemctl disable "$target" >/dev/null 2>&1
+        rm "${files[$idx]}"
+        systemctl daemon-reload
+        echo -e "${GREEN}سرویس حذف شد.${NC}"
+        sleep 1
     fi
 }
 
 uninstall_all() {
-    read -p "آیا مطمئن هستید که می‌خواهید همه تانل‌ها پاک شوند؟ (y/n): " confirm
+    read -p "پاکسازی کامل و حذف همه تانل‌ها؟ (y/n): " confirm
     if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
         for f in /etc/systemd/system/gost-*.service; do
             if [ -e "$f" ]; then
                 name=$(basename -- "$f")
-                systemctl stop "$name" >/dev/null 2>&1
-                systemctl disable "$name" >/dev/null 2>&1
+                systemctl stop "$name"
+                systemctl disable "$name"
                 rm "$f"
             fi
         done
         systemctl daemon-reload
         rm -f /usr/local/bin/gost
-        echo -e "${GREEN}پاکسازی کامل انجام شد.${NC}"
+        echo -e "${GREEN}همه چیز پاک شد.${NC}"
         sleep 2
     fi
 }
@@ -190,15 +200,15 @@ uninstall_all() {
 menu() {
     while true; do
         clear
-        echo -e "${YELLOW}=== Gost Aggregation Tunnel (Load Balance) ===${NC}"
-        echo "1) نصب پیش‌نیازها (گاست)"
-        echo "2) ساخت تانل سرور ایران (ارسال کننده)"
-        echo "3) ساخت تانل سرور خارج (دریافت کننده)"
-        echo "4) مشاهده وضعیت و مدیریت تانل‌ها"
-        echo "5) حذف کامل همه چیز"
+        echo -e "${YELLOW}=== Gost LoadBalancing Fix ===${NC}"
+        echo "1) نصب هسته Gost"
+        echo "2) کانفیگ سرور ایران (Fix: None Node Available)"
+        echo "3) کانفیگ سرور خارج"
+        echo "4) مدیریت و حذف تانل‌ها"
+        echo "5) پاکسازی کامل"
         echo "0) خروج"
-        echo "----------------------------------------------"
-        read -p "لطفا یک گزینه را انتخاب کنید: " choice
+        echo "----------------------------"
+        read -p "گزینه: " choice
         case $choice in
             1) install_prerequisites ;;
             2) setup_iran_tunnel ;;
@@ -206,9 +216,8 @@ menu() {
             4) manage_tunnels ;;
             5) uninstall_all ;;
             0) exit 0 ;;
-            *) echo -e "${RED}گزینه نامعتبر!${NC}"; sleep 1 ;;
+            *) echo "نامعتبر" ; sleep 1 ;;
         esac
     done
 }
-
 menu
