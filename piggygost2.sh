@@ -10,7 +10,7 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 install_gost() {
-  # نصب پیش‌نیازها در صورت عدم وجود
+  # نصب پیش‌نیازها
   if command -v apt >/dev/null; then
     apt update -y && apt install -y wget gzip
   elif command -v yum >/dev/null; then
@@ -19,8 +19,9 @@ install_gost() {
     dnf install -y wget gzip
   fi
 
-  # دانلود و نصب gost (کد ارائه شده توسط شما)
+  # دانلود و نصب gost (دقیقاً کدی که شما دادید)
   if [ ! -f "/usr/local/bin/gost" ]; then
+      echo "Downloading GOST v2.11.5..."
       wget https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz -O gost.gz
       
       # استخراج فایل
@@ -37,7 +38,7 @@ install_gost() {
       echo "gost از قبل نصب شده است."
   fi
 
-  # ساخت پوشه کانفیگ و اسکریپت راه‌انداز (Wrapper) برای خواندن خطوط
+  # ساخت پوشه کانفیگ و اسکریپت راه‌انداز سرویس
   if [ ! -f "/etc/systemd/system/gost.service" ]; then
     mkdir -p /etc/gost
     
@@ -159,6 +160,8 @@ echo "Tunnel added: $id"
 list_tunnels() {
   if [[ -f "$CFG" ]]; then
     grep "$MARK START" "$CFG" | nl
+  else
+    echo "No config file found."
   fi
 }
 
