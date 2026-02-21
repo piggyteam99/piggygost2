@@ -10,31 +10,35 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 install_gost() {
-  if ! command -v gost >/dev/null 2>&1; then
-    echo "Installing latest GOST..."
-    
-    # نصب پیش‌نیازها
-    if command -v apt >/dev/null; then
-      apt update -y && apt install -y curl wget gzip
-    elif command -v yum >/dev/null; then
-      yum install -y curl wget gzip
-    elif command -v dnf >/dev/null; then
-      dnf install -y curl wget gzip
-    fi
+  # نصب پیش‌نیازها در صورت عدم وجود
+  if command -v apt >/dev/null; then
+    apt update -y && apt install -y wget gzip
+  elif command -v yum >/dev/null; then
+    yum install -y wget gzip
+  elif command -v dnf >/dev/null; then
+    dnf install -y wget gzip
+  fi
 
-    # دریافت آخرین نسخه GOST از گیت‌هاب
-    LATEST_VERSION=$(curl -s https://api.github.com/repos/ginuerzh/gost/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    if [[ -z "$LATEST_VERSION" ]]; then
-      LATEST_VERSION="v2.11.5" # نسخه جایگزین در صورت مسدود بودن API
-    fi
-    VER=${LATEST_VERSION#v}
-    URL="https://github.com/ginuerzh/gost/releases/download/${LATEST_VERSION}/gost-linux-amd64-${VER}.gz"
-    
-    echo "Downloading GOST $LATEST_VERSION ..."
-    wget -qO- "$URL" | gzip -d > /usr/local/bin/gost
-    chmod +x /usr/local/bin/gost
+  # دانلود و نصب gost (کد ارائه شده توسط شما)
+  if [ ! -f "/usr/local/bin/gost" ]; then
+      wget https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz -O gost.gz
+      
+      # استخراج فایل
+      gzip -d gost.gz
+      
+      # انتقال به مسیر اجرایی
+      mv gost /usr/local/bin/gost
+      
+      # دادن دسترسی اجرا
+      chmod +x /usr/local/bin/gost
+      
+      echo "gost با موفقیت نصب شد."
+  else
+      echo "gost از قبل نصب شده است."
+  fi
 
-    # ساخت پوشه کانفیگ و اسکریپت راه‌انداز
+  # ساخت پوشه کانفیگ و اسکریپت راه‌انداز (Wrapper) برای خواندن خطوط
+  if [ ! -f "/etc/systemd/system/gost.service" ]; then
     mkdir -p /etc/gost
     
     cat > /etc/gost/run.sh <<'EOF'
@@ -73,7 +77,7 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     systemctl enable gost >/dev/null 2>&1 || true
-    echo "GOST installed successfully."
+    echo "Service configured."
   fi
 }
 
